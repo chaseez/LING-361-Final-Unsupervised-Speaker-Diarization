@@ -1,0 +1,29 @@
+Thu Apr 10 12:18:32 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.86.15              Driver Version: 570.86.15      CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-80GB          Off |   00000000:4C:00.0 Off |                    0 |
+| N/A   35C    P0             61W /  400W |       1MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+loading the audio...
+initializing Whisper model...
+running inference on Whisper...
+starting raw shape: torch.Size([256, 48000])
+mel cepstral shape: torch.Size([256, 128, 3000])
+ending encoded shape: torch.Size([256, 1500, 1280])
+starting raw shape: torch.Size([168, 48000])
+mel cepstral shape: torch.Size([168, 128, 3000])
+ending encoded shape: torch.Size([168, 1500, 1280])
