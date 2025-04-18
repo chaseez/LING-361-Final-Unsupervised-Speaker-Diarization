@@ -15,9 +15,11 @@ import torch
 import json
 import math
 
+@torch.no_grad()
 def shrinkage_operator(u, tresh):
         return torch.sign(u) * torch.maximum(torch.abs(u) - tresh, torch.tensor(0.0, device=u.device))
 
+@torch.no_grad()
 def project(u):
     u = u / torch.norm(u, p=2)
     # Test it between -1 and 1. Maybe 0 and 1 are better for mathematical properties??
@@ -41,7 +43,7 @@ if __name__ == '__main__':
     model = None
     dim_embd = None
     if 'can' in encoder:
-        model = CanaryEncoder().to(device)
+        model = CanaryEncoder(device).to(device)
         dim_embd = 1024
     else:
         model = Whisper().to(device)
@@ -99,19 +101,28 @@ if __name__ == '__main__':
         print('calculating SVD...', flush=True)
         _, s, _ = np.linalg.svd(embd)
 
-        num_speakers = s * 2
+        print('Generating Knee', flush=True)
+        knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
+        
+        num_speakers = knee.knee * 2
 
-        embd_basis_matrix = nn.Parameter(torch.nn.init.kaiming_normal(torch.randn((dim_embd, num_speakers)))).to(device)
+        embd_basis_matrix = torch.nn.init.kaiming_normal(torch.randn((dim_embd, num_speakers))).to(device)
         activation_matrix = None
+
         if isinstance(model, Whisper):
-            # (k, T)
-            activation_matrix = nn.Parameter(torch.nn.init.kaiming_normal(torch.randn((num_speakers, 2 * 1500)))).to(device)
+            activation_matrix = torch.randn((num_speakers, 2 * 1500)).to(device)
         else:
-            activation_matrix = nn.Parameter(torch.nn.init.kaiming_normal(torch.randn((num_speakers, embeddings.shape[1])))).to(device)
+            activation_matrix = torch.randn((num_speakers, embeddings.shape[1])).to(device)
 
 
-        embd_optim = AdamW(embd_basis_matrix.parameters(), lr=0.001)
-        activation_optim = AdamW(activation_matrix.parameters(), lr=0.001)
+        nn.init.kaiming_normal_(embd_basis_matrix)
+        embd_basis_matrix.requires_grad_(True)
+
+        nn.init.kaiming_normal_(activation_matrix)
+        activation_matrix.requires_grad_(True)
+
+        embd_optim = AdamW([embd_basis_matrix], lr=0.001)
+        activation_optim = AdamW([activation_matrix], lr=0.001)
 
         batch_size = None
         if isinstance(model, Whisper):
@@ -123,40 +134,55 @@ if __name__ == '__main__':
 
         loader = DataLoader(embeddings, batch_size=batch_size)
 
+        losses = []
+
+        curr_loss = []
+
+        log_interval = 10
+
         print('Starting Training', flush=True)
-        for step in range(steps):
-            # CANNOT BE BATCHED YET 
-            for embd in tqdm(loader):
-                print(embd.size, flush=True)
-                # Reshape embd to be MxT instead of TxM
-                y_hat = embd.T - (embd_basis_matrix @ activation_matrix.detach())
-                term1 = torch.norm(y_hat)
-                term2 = embd_basis_weight * torch.norm(embd_basis_matrix)
-                term3 = activation_weight * torch.norm(activation_matrix.detach())
-                term4 = jitter_loss_weight * jitter_loss(activation_matrix.detach())
+        with tqdm(range(steps*len(loader))) as pbar:
+            for step in range(steps):
+                # CANNOT BE BATCHED YET 
+                # Doesn't need to be batched, just chunked into 6 segments
+                for i, embd in enumerate(loader):
+                    pbar.update(1)
+                    # Reshape embd to be MxT instead of TxM
+                    y_hat = embd.T - (embd_basis_matrix @ activation_matrix.detach())
+                    term1 = torch.norm(y_hat)
+                    term2 = embd_basis_weight * torch.norm(embd_basis_matrix)
+                    term3 = activation_weight * torch.norm(activation_matrix.detach())
+                    term4 = jitter_loss_weight * jitter_loss(activation_matrix.detach())
 
-                loss = term1 + term2 + term3 + term4
+                    loss = term1 + term2 + term3 + term4
 
-                loss.backward()
-                embd_optim.step()
-                embd_optim.zero_grad()
+                    loss.backward()
+                    embd_optim.step()
+                    embd_optim.zero_grad()
 
-                with torch.no_grad():
-                    embd_basis_matrix = project(shrinkage_operator(embd_basis_matrix, embd_lagrange_multiplier))
+                    curr_loss.append(loss.item())
 
-                y_hat = embd - (embd_basis_matrix.detach() @ activation_matrix)
-                term1 = torch.norm(y_hat)
-                term2 = embd_basis_weight * torch.norm(embd_basis_matrix.detach())
-                term3 = activation_weight * torch.norm(activation_matrix)
-                term4 = jitter_loss_weight * jitter_loss(activation_matrix)
+                    embd_basis_matrix.data = project(shrinkage_operator(embd_basis_matrix, embd_lagrange_multiplier))
 
-                loss = term1 + term2 + term3 + term4
+                    y_hat = embd.T - (embd_basis_matrix.detach() @ activation_matrix)
+                    term1 = torch.norm(y_hat)
+                    term2 = embd_basis_weight * torch.norm(embd_basis_matrix.detach())
+                    term3 = activation_weight * torch.norm(activation_matrix)
+                    term4 = jitter_loss_weight * jitter_loss(activation_matrix)
 
-                loss.backward()
-                activation_optim.step()
-                activation_optim.zero_grad()
+                    loss = term1 + term2 + term3 + term4
 
-                with torch.no_grad():
-                    activation_matrix = project(shrinkage_operator(activation_matrix, activation_lagrange_multiplier))
+                    loss.backward()
+                    activation_optim.step()
+                    activation_optim.zero_grad()
+
+                    curr_loss.append(loss.item())
+
+                    activation_matrix.data = project(shrinkage_operator(activation_matrix, activation_lagrange_multiplier))
+
+                    if i % log_interval == 0:
+                        losses.append(np.mean(curr_loss))
+                        pbar.set_description(f'Epoch {step+1}/{steps} loss: {losses[-1]:.3f}')
+                        curr_loss = []
 
             

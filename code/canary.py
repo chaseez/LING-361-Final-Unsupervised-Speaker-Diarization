@@ -4,12 +4,12 @@ import torch
 
 # inherit the properties of torch.nn.Module
 class CanaryEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, device):
         # initialize the nn.Module class
         super(CanaryEncoder, self).__init__()
 
         # export all the layers associated with the encoder
-        model = nemo_asr.models.ASRModel.from_pretrained("nvidia/canary-1b", map_location=torch.device('cuda'))
+        model = nemo_asr.models.ASRModel.from_pretrained("nvidia/canary-1b", map_location=torch.device(device))
 
         self.preprocessor = model.preprocessor
         self.encoder = model.encoder
