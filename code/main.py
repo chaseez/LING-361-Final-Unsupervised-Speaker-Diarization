@@ -8,6 +8,7 @@ from pathlib import Path
 from optim import FISTA
 from tqdm import tqdm
 
+import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 import torchaudio
@@ -26,11 +27,11 @@ def project(u):
     return torch.clamp(u, 0, 1)
 
 def jitter_loss(A):
-    return 0
+    return torch.mean(torch.abs(A[:-1] - A[1:]))
 
 parser = ArgumentParser()
 parser.add_argument('-e', '--encoder', type=str, default='whisper', help='Specify which encoder: Whisper or Canary')
-parser.add_argument('-n', '--epochs', type=int, default=10000, help='Specify how many epochs.')
+parser.add_argument('-n', '--epochs', type=int, default=10, help='Specify how many epochs.')
 argv = parser.parse_args()
 
 if __name__ == '__main__':
@@ -51,13 +52,12 @@ if __name__ == '__main__':
 
     
     # Found on page 3 at the end of the page
-    activation_weight = 0.2424
-    embd_basis_weight = 0.3366
+    # activation_weight = 0.2424
+    # embd_basis_weight = 0.3366
     jitter_loss_weight = 0.06
 
-    # I DUNNO WHAT THESE DO
-    embd_lagrange_multiplier = 2
-    activation_lagrange_multiplier = 2
+    embd_lagrange_multiplier = 0.001
+    activation_lagrange_multiplier = 0.001
 
     files = list(Path('../data/amicorpus').rglob('*Mix-Headset.wav'))
 
@@ -95,25 +95,28 @@ if __name__ == '__main__':
 
         # flatten the shape to be (T, model_dim)
         embeddings = embeddings.flatten(start_dim=0, end_dim=1)
-        embd = embeddings[::100,:].contiguous().cpu().to(torch.float32)
 
         # SVD is used to calculate the number of speakers
-        print('calculating SVD...', flush=True)
-        _, s, _ = np.linalg.svd(embd)
+        # print('calculating SVD...', flush=True)
+        # _, s, _ = np.linalg.svd(embd)
 
-        print('Generating Knee', flush=True)
-        knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
+        # print('Generating Knee', flush=True)
+        # knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
         
-        num_speakers = knee.knee * 2
+        num_speakers = 30
 
-        embd_basis_matrix = torch.nn.init.kaiming_normal(torch.randn((dim_embd, num_speakers))).to(device)
-        activation_matrix = None
+        print('Num Speakers:', num_speakers, flush=True)
 
+        T = None
         if isinstance(model, Whisper):
-            activation_matrix = torch.randn((num_speakers, 2 * 1500)).to(device)
+            # (batch, 1500, 1280) for 3 second window
+            T = 2 * 1500
         else:
-            activation_matrix = torch.randn((num_speakers, embeddings.shape[1])).to(device)
+            # (batch, 1024, T) => (batch, T, 1024) for 6 second window
+            T = embeddings.shape[1]
 
+        embd_basis_matrix = torch.randn((dim_embd, num_speakers)).to(device)
+        activation_matrix = torch.randn((num_speakers, T)).to(device)
 
         nn.init.kaiming_normal_(embd_basis_matrix)
         embd_basis_matrix.requires_grad_(True)
@@ -121,18 +124,11 @@ if __name__ == '__main__':
         nn.init.kaiming_normal_(activation_matrix)
         activation_matrix.requires_grad_(True)
 
-        embd_optim = AdamW([embd_basis_matrix], lr=0.001)
-        activation_optim = AdamW([activation_matrix], lr=0.001)
+        embd_optim = AdamW([embd_basis_matrix], lr=0.01)
+        activation_optim = AdamW([activation_matrix], lr=0.01)
 
-        batch_size = None
-        if isinstance(model, Whisper):
-            # (batch, 1500, 1280) for 3 second window
-            batch_size = 2 * 1500
-        else:
-            # (batch, 1024, T) => (batch, T, 1024) for 6 second window
-            batch_size = embeddings.shape[1]
 
-        loader = DataLoader(embeddings, batch_size=batch_size)
+        loader = DataLoader(embeddings, batch_size=T)
 
         losses = []
 
@@ -148,13 +144,9 @@ if __name__ == '__main__':
                 for i, embd in enumerate(loader):
                     pbar.update(1)
                     # Reshape embd to be MxT instead of TxM
-                    y_hat = embd.T - (embd_basis_matrix @ activation_matrix.detach())
-                    term1 = torch.norm(y_hat)
-                    term2 = embd_basis_weight * torch.norm(embd_basis_matrix)
-                    term3 = activation_weight * torch.norm(activation_matrix.detach())
-                    term4 = jitter_loss_weight * jitter_loss(activation_matrix.detach())
+                    y_hat = torch.mean((embd.T - (embd_basis_matrix @ activation_matrix.detach()))**2)
 
-                    loss = term1 + term2 + term3 + term4
+                    loss = y_hat + jitter_loss(activation_matrix.detach())
 
                     loss.backward()
                     embd_optim.step()
@@ -164,13 +156,9 @@ if __name__ == '__main__':
 
                     embd_basis_matrix.data = project(shrinkage_operator(embd_basis_matrix, embd_lagrange_multiplier))
 
-                    y_hat = embd.T - (embd_basis_matrix.detach() @ activation_matrix)
-                    term1 = torch.norm(y_hat)
-                    term2 = embd_basis_weight * torch.norm(embd_basis_matrix.detach())
-                    term3 = activation_weight * torch.norm(activation_matrix)
-                    term4 = jitter_loss_weight * jitter_loss(activation_matrix)
+                    y_hat = torch.mean((embd.T - (embd_basis_matrix.detach() @ activation_matrix))**2)
 
-                    loss = term1 + term2 + term3 + term4
+                    loss = y_hat + jitter_loss(activation_matrix)
 
                     loss.backward()
                     activation_optim.step()
@@ -184,5 +172,7 @@ if __name__ == '__main__':
                         losses.append(np.mean(curr_loss))
                         pbar.set_description(f'Epoch {step+1}/{steps} loss: {losses[-1]:.3f}')
                         curr_loss = []
+        with open(file.name.replace('.txt', '.json'), 'w') as f:
+            json.dump({'losses': losses}, f)
 
             
