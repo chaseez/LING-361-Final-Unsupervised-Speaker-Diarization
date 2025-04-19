@@ -16,4 +16,4 @@ export OMP_NUM_THREADS=$SLURM_CPUS_ON_NODE
 # LOAD MODULES, INSERT CODE, AND RUN YOUR PROGRAMS HERE
 nvidia-smi
 
-python main.py -e 'whisper' -n 100
+python main.py -e 'canary' -n 50

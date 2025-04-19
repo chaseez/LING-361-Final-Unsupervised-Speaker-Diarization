@@ -24,7 +24,7 @@ def shrinkage_operator(u, tresh):
 def project(u):
     u = u / torch.norm(u, p=2)
     # Test it between -1 and 1. Maybe 0 and 1 are better for mathematical properties??
-    return torch.clamp(u, 0, 1)
+    return torch.clamp(u, -1, 1)
 
 def jitter_loss(A):
     return torch.mean(torch.abs(A[:-1] - A[1:]))
@@ -52,8 +52,8 @@ if __name__ == '__main__':
 
     
     # Found on page 3 at the end of the page
-    # activation_weight = 0.2424
-    # embd_basis_weight = 0.3366
+    activation_weight = 0.2424
+    embd_basis_weight = 0.3366
     jitter_loss_weight = 0.06
 
     embd_lagrange_multiplier = 0.001
@@ -65,16 +65,17 @@ if __name__ == '__main__':
     
     for file in files:
         print('loading audio...', flush=True)
+        print(file.name)
         waveform, sample_rate = torchaudio.load(file)
         waveform = waveform.to(device)
 
         embeddings = None
 
         tot_len = waveform.shape[-1]
-        segments = math.floor(tot_len / (sample_rate * 6))
+        segments = math.floor(tot_len / (sample_rate * 3))
 
         # put files in 3 second windows
-        clipped_wav = waveform[:,:segments * sample_rate * 6]
+        clipped_wav = waveform[:,:segments * sample_rate * 3]
 
         print('Getting embeddings...', flush=True)
         if isinstance(model, Whisper):
@@ -86,34 +87,39 @@ if __name__ == '__main__':
             for wav in loader:
                 embeddings.append(model(wav, sample_rate).last_hidden_state)
             embeddings = torch.cat(embeddings, dim=0)
-        else:
-            clipped_signal_length = torch.full((clipped_wav.shape[0],), clipped_wav.shape[1], device=device).contiguous()
-            embeddings = model(clipped_wav, clipped_signal_length)
+            
+            # 3 second window
+            T = 1 * 1500
 
+        else:
+            clipped_wav = clipped_wav.reshape(-1, sample_rate * 3)
+            loader = DataLoader(clipped_wav, batch_size=32)
+            embeddings = []
+            for wav in loader:
+                clipped_signal_length = torch.full((wav.shape[0],), wav.shape[1], device=device).contiguous()
+                embeddings.append(model(wav, clipped_signal_length)[0])
+            try:
+                embeddings = torch.cat(embeddings, dim=0)
+            except RuntimeError as e:
+                print(e)
+                continue
             # Rearrange shape from (batch, 1024, T) => (batch, T, 1024)
             embeddings = embeddings.permute(0,2,1).contiguous()
+            T = embeddings.shape[1]
 
         # flatten the shape to be (T, model_dim)
         embeddings = embeddings.flatten(start_dim=0, end_dim=1)
 
         # SVD is used to calculate the number of speakers
-        # print('calculating SVD...', flush=True)
-        # _, s, _ = np.linalg.svd(embd)
+        print('calculating SVD...', flush=True)
+        _, s, _ = np.linalg.svd(embeddings.cpu().to(torch.float32))
 
         # print('Generating Knee', flush=True)
-        # knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
-        
+        knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
+        print(knee.knee)
         num_speakers = 30
 
         print('Num Speakers:', num_speakers, flush=True)
-
-        T = None
-        if isinstance(model, Whisper):
-            # (batch, 1500, 1280) for 3 second window
-            T = 2 * 1500
-        else:
-            # (batch, 1024, T) => (batch, T, 1024) for 6 second window
-            T = embeddings.shape[1]
 
         embd_basis_matrix = torch.randn((dim_embd, num_speakers)).to(device)
         activation_matrix = torch.randn((num_speakers, T)).to(device)
@@ -124,9 +130,11 @@ if __name__ == '__main__':
         nn.init.kaiming_normal_(activation_matrix)
         activation_matrix.requires_grad_(True)
 
-        embd_optim = AdamW([embd_basis_matrix], lr=0.01)
-        activation_optim = AdamW([activation_matrix], lr=0.01)
+        embd_optim = AdamW([embd_basis_matrix], lr=0.1)
+        activation_optim = AdamW([activation_matrix], lr=0.1)
 
+        # embd_optim = FISTA([embd_basis_matrix], lr=0.01, lambda_=embd_lagrange_multiplier)
+        # activation_optim = FISTA([activation_matrix], lr=0.01, lambda_=activation_lagrange_multiplier)
 
         loader = DataLoader(embeddings, batch_size=T)
 
@@ -172,7 +180,7 @@ if __name__ == '__main__':
                         losses.append(np.mean(curr_loss))
                         pbar.set_description(f'Epoch {step+1}/{steps} loss: {losses[-1]:.3f}')
                         curr_loss = []
-        with open(file.name.replace('.txt', '.json'), 'w') as f:
+        with open(f"results/{file.name.replace('.wav', '.json')}", 'w') as f:
             json.dump({'losses': losses}, f)
 
             
