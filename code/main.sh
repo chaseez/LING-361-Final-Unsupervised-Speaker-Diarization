@@ -1,6 +1,6 @@
 #!/bin/bash --login
 
-#SBATCH --time=30:00   # walltime
+#SBATCH --time=3:00:00   # walltime
 #SBATCH --ntasks=1   # number of processor cores (i.e. tasks)
 #SBATCH --nodes=1   # number of nodes
 #SBATCH --qos=cs
@@ -16,4 +16,4 @@ export OMP_NUM_THREADS=$SLURM_CPUS_ON_NODE
 # LOAD MODULES, INSERT CODE, AND RUN YOUR PROGRAMS HERE
 nvidia-smi
 
-python main.py -e 'canary' -n 50
+python main.py -e 'canary' -n 100

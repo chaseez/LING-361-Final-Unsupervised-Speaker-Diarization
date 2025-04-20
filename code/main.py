@@ -1,14 +1,11 @@
 from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 from canary import CanaryEncoder
-from kneed import KneeLocator
-from torch.optim import AdamW
 from whisper import Whisper
 from pathlib import Path
-from optim import FISTA
 from tqdm import tqdm
 
-import torch.nn.functional as F
+import torch.optim as optim
 import torch.nn as nn
 import numpy as np
 import torchaudio
@@ -24,7 +21,7 @@ def shrinkage_operator(u, tresh):
 def project(u):
     u = u / torch.norm(u, p=2)
     # Test it between -1 and 1. Maybe 0 and 1 are better for mathematical properties??
-    return torch.clamp(u, -1, 1)
+    return torch.clamp(u, 0, 1)
 
 def jitter_loss(A):
     return torch.mean(torch.abs(A[:-1] - A[1:]))
@@ -46,10 +43,14 @@ if __name__ == '__main__':
     if 'can' in encoder:
         model = CanaryEncoder(device).to(device)
         dim_embd = 1024
+        T = 38
     else:
         model = Whisper().to(device)
         dim_embd = 1280
+        # 3 second window
+        T = 1 * 1500
 
+    num_speakers = 18
     
     # Found on page 3 at the end of the page
     activation_weight = 0.2424
@@ -59,11 +60,17 @@ if __name__ == '__main__':
     embd_lagrange_multiplier = 0.001
     activation_lagrange_multiplier = 0.001
 
-    files = list(Path('../data/amicorpus').rglob('*Mix-Headset.wav'))
+    files = list(Path('../data/voxconverse-master/audio').rglob('*.wav'))
 
     print(len(files))
+
+    losses = []
+    curr_loss = []
+
+    log_interval = 10
     
-    for file in files:
+
+    for file in tqdm(files):
         print('loading audio...', flush=True)
         print(file.name)
         waveform, sample_rate = torchaudio.load(file)
@@ -82,14 +89,11 @@ if __name__ == '__main__':
             clipped_wav = clipped_wav.reshape(-1, sample_rate * 3)
 
             # biggest batch size an A100 can handle (3s * 1024 / 60 = 51.2 minutes of audio)
-            loader = DataLoader(clipped_wav, batch_size=1024)
+            loader = DataLoader(clipped_wav, batch_size=32)
             embeddings = []
             for wav in loader:
                 embeddings.append(model(wav, sample_rate).last_hidden_state)
             embeddings = torch.cat(embeddings, dim=0)
-            
-            # 3 second window
-            T = 1 * 1500
 
         else:
             clipped_wav = clipped_wav.reshape(-1, sample_rate * 3)
@@ -101,7 +105,7 @@ if __name__ == '__main__':
             try:
                 embeddings = torch.cat(embeddings, dim=0)
             except RuntimeError as e:
-                print(e)
+                print(e, flush=True)
                 continue
             # Rearrange shape from (batch, 1024, T) => (batch, T, 1024)
             embeddings = embeddings.permute(0,2,1).contiguous()
@@ -110,51 +114,41 @@ if __name__ == '__main__':
         # flatten the shape to be (T, model_dim)
         embeddings = embeddings.flatten(start_dim=0, end_dim=1)
 
-        # SVD is used to calculate the number of speakers
-        print('calculating SVD...', flush=True)
-        _, s, _ = np.linalg.svd(embeddings.cpu().to(torch.float32))
-
-        # print('Generating Knee', flush=True)
-        knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
-        print(knee.knee)
-        num_speakers = 30
-
-        print('Num Speakers:', num_speakers, flush=True)
-
-        embd_basis_matrix = torch.randn((dim_embd, num_speakers)).to(device)
-        activation_matrix = torch.randn((num_speakers, T)).to(device)
-
-        nn.init.kaiming_normal_(embd_basis_matrix)
-        embd_basis_matrix.requires_grad_(True)
-
-        nn.init.kaiming_normal_(activation_matrix)
-        activation_matrix.requires_grad_(True)
-
-        embd_optim = AdamW([embd_basis_matrix], lr=0.1)
-        activation_optim = AdamW([activation_matrix], lr=0.1)
-
         # embd_optim = FISTA([embd_basis_matrix], lr=0.01, lambda_=embd_lagrange_multiplier)
         # activation_optim = FISTA([activation_matrix], lr=0.01, lambda_=activation_lagrange_multiplier)
 
         loader = DataLoader(embeddings, batch_size=T)
 
-        losses = []
-
-        curr_loss = []
-
-        log_interval = 10
-
         print('Starting Training', flush=True)
         with tqdm(range(steps*len(loader))) as pbar:
-            for step in range(steps):
-                # CANNOT BE BATCHED YET 
-                # Doesn't need to be batched, just chunked into 6 segments
-                for i, embd in enumerate(loader):
+            for i, embd in enumerate(loader):
+                embd_basis_matrix = torch.randn((dim_embd, num_speakers)).to(device)
+                activation_matrix = torch.randn((num_speakers, T)).to(device)
+
+                nn.init.kaiming_normal_(embd_basis_matrix)
+                embd_basis_matrix.requires_grad_(True)
+
+                nn.init.kaiming_normal_(activation_matrix)
+                activation_matrix.requires_grad_(True)
+
+                embd_optim = optim.AdamW([embd_basis_matrix], lr=0.01, weight_decay=embd_basis_weight)
+                activation_optim = optim.AdamW([activation_matrix], lr=0.01, weight_decay=activation_weight)
+
+                embd_scheduler = optim.lr_scheduler.CosineAnnealingLR(embd_optim, T_max=steps)
+                activation_scheduler = optim.lr_scheduler.CosineAnnealingLR(embd_optim, T_max=steps)
+                for step in range(steps):
+                    # if step == 0 and i == 0:
+                    #     # SVD is used to calculate the number of speakers
+                    #     print('calculating SVD...', flush=True)
+                    #     _, s, _ = np.linalg.svd(embd.cpu().to(torch.float32))
+
+                    #     # print('Generating Knee', flush=True)
+                    #     knee = KneeLocator(np.arange(s.shape[0]), s, S=1.0, curve='concave', direction='decreasing')
+                    #     print(knee.knee, flush=True)
                     pbar.update(1)
                     # Reshape embd to be MxT instead of TxM
-                    y_hat = torch.mean((embd.T - (embd_basis_matrix @ activation_matrix.detach()))**2)
-
-                    loss = y_hat + jitter_loss(activation_matrix.detach())
+                    y_hat = torch.norm(embd.T - (embd_basis_matrix @ activation_matrix.detach()))
+                    loss = y_hat + jitter_loss_weight * jitter_loss(activation_matrix.detach())
 
                     loss.backward()
                     embd_optim.step()
@@ -164,9 +158,9 @@ if __name__ == '__main__':
 
                     embd_basis_matrix.data = project(shrinkage_operator(embd_basis_matrix, embd_lagrange_multiplier))
 
-                    y_hat = torch.mean((embd.T - (embd_basis_matrix.detach() @ activation_matrix))**2)
+                    y_hat = torch.norm(embd.T - (embd_basis_matrix.detach() @ activation_matrix))
 
-                    loss = y_hat + jitter_loss(activation_matrix)
+                    loss = y_hat + jitter_loss_weight * jitter_loss(activation_matrix)
 
                     loss.backward()
                     activation_optim.step()
@@ -176,11 +170,29 @@ if __name__ == '__main__':
 
                     activation_matrix.data = project(shrinkage_operator(activation_matrix, activation_lagrange_multiplier))
 
+                    embd_scheduler.step()
+                    activation_scheduler.step()
+
                     if i % log_interval == 0:
                         losses.append(np.mean(curr_loss))
                         pbar.set_description(f'Epoch {step+1}/{steps} loss: {losses[-1]:.3f}')
                         curr_loss = []
-        with open(f"results/{file.name.replace('.wav', '.json')}", 'w') as f:
-            json.dump({'losses': losses}, f)
 
-            
+                results_path = Path('results')
+                results_path.mkdir(exist_ok=True)
+
+                results = results_path.joinpath(f"{file.name.removesuffix('.wav')}-{i}-{encoder}-{steps}-epochs-{losses[-1]:.4f}.json")
+                with open(results, 'w') as f:
+                    json.dump({'losses': losses}, f)
+
+                model_path = Path('models')
+                model_path.mkdir(exist_ok=True)
+
+                activation_path = model_path.joinpath(f"{file.name.removesuffix('.wav')}-{i}-{encoder}-activation-{step}-epochs-{losses[-1]:.4f}.pt")
+                with open(activation_path, 'wb') as f:
+                    torch.save(activation_matrix, f)
+
+                basis_path = model_path.joinpath(f"{file.name.removesuffix('.wav')}-{i}-{encoder}-basis-{step}-epochs-{losses[-1]:.4f}.pt")
+                with open(basis_path, 'wb') as f:
+                    torch.save(embd_basis_matrix, f)
+                

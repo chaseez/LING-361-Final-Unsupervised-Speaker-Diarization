@@ -1,3 +1,6 @@
-data/amicorpus/
+amicorpus/
 *.out
 *.zip
+voxconverse-master/
+results/
+models/
