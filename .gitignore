@@ -4,3 +4,4 @@ amicorpus/
 voxconverse-master/
 results/
 models/
+*.gz
