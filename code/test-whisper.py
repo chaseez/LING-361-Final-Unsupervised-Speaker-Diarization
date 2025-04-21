@@ -8,7 +8,21 @@ import torch
 import math
 import json
 
+
 if __name__ == "__main__":
+    """
+    Process audio using Whisper encoder and perform singular value decomposition analysis.
+
+    Steps:
+    1. Load and segment audio into 3-second windows
+    2. Initialize Whisper encoder model
+    3. Extract embeddings in batches (optimized for GPU)
+    4. Perform SVD on flattened embeddings
+    5. Calculate optimal component count using KneeLocator
+    6. Save singular values and knee point to JSON
+    """
+
+    # Device configuration (CUDA/CPU)
     device =  'cuda:0' if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     print('loading the audio...', flush=True)

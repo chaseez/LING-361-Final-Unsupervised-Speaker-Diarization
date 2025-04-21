@@ -62,11 +62,6 @@ if __name__ == '__main__':
 
     files = list(Path('../data/voxconverse-master/audio').rglob('*.wav'))
 
-    print(len(files))
-
-    losses = []
-    curr_loss = []
-
     log_interval = 10
     
 
@@ -136,6 +131,10 @@ if __name__ == '__main__':
 
                 embd_scheduler = optim.lr_scheduler.CosineAnnealingLR(embd_optim, T_max=steps)
                 activation_scheduler = optim.lr_scheduler.CosineAnnealingLR(embd_optim, T_max=steps)
+
+                losses = [70.0]
+                curr_loss = []
+
                 for step in range(steps):
                     # if step == 0 and i == 0:
                     #     # SVD is used to calculate the number of speakers
@@ -173,7 +172,7 @@ if __name__ == '__main__':
                     embd_scheduler.step()
                     activation_scheduler.step()
 
-                    if i % log_interval == 0:
+                    if step % log_interval == 0:
                         losses.append(np.mean(curr_loss))
                         pbar.set_description(f'Epoch {step+1}/{steps} loss: {losses[-1]:.3f}')
                         curr_loss = []
